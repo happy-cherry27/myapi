@@ -1,0 +1,46 @@
+# 一键管理 app + db + redis 三个容器
+
+version: "3.8"
+
+services:
+  #  app：FastAPI 应用
+  app:
+    build: .                           # 用当前目录的 Dockerfile 构建镜像
+    container_name: myapi_app          # 容器名（方便 docker logs 时直接用名字）
+    ports:                             # 端口映射
+      - "8000:8000"                    # 本机8000 穿透到 容器8000
+    env_file:
+      - .env.docker                    # 用 Docker 专用环境变量（host 写成 db/redis）
+    depends_on:                        # 启动顺序：等 db 和 redis 先启动（不等它们 ready，只等启动）
+      - db
+      - redis
+    volumes:
+      - .:/app                         # 代码挂载：改代码不用重新构建镜像（热加载需手动重启）
+
+  # db：MySQL 8.0
+  db:
+    image: mysql:8.0                   # 直接用官方 MySQL 镜像
+    container_name: myapi_db
+    restart: unless-stopped            # 崩了自动重启
+    environment:                       # 环境变量（首次启动时自动创建库和用户）
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: myapi_db
+    ports:
+      - "3307:3306"                    # 本机3307 → 容器3306（避免和本机 MySQL 冲突）
+    volumes:
+      - db_data:/var/lib/mysql         # 数据持久化：删容器不丢数据
+
+  #  redis：Redis 7
+  redis:
+    image: redis:7-alpine              # alpine 版更小（~30MB）
+    container_name: myapi_redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"                    # 本机6380 → 容器6379（避免和本机 Redis 冲突）
+    volumes:
+      - redis_data:/data               # 数据持久化
+
+#  命名卷：docker-compose down 不删数据
+volumes:
+  db_data:
+  redis_data:
