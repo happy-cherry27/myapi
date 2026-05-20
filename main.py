@@ -7,6 +7,7 @@ import redis.asyncio as aioredis
 
 from database import get_connection
 from redis_client import get_redis
+from routers.chat import router as chat_router
 
 app = FastAPI()
 
@@ -155,3 +156,6 @@ async def create_news(
     finally:
         cursor.close()
         conn.close()
+
+# 注册AI聊天路由
+app.include_router(chat_router)
