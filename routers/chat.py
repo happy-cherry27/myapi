@@ -1,6 +1,8 @@
 import os
+import json
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from openai import OpenAI
 from schemas.chat import ChatRequest
 
@@ -45,3 +47,42 @@ def chat(request:ChatRequest):
     except Exception as e:
         # 6、统一异常处理
         raise HTTPException(status_code=500,detail=f"AI调用失败：{str(e)}")
+
+# 流式输出端点
+@router.post("/chat/stream")
+def chat_stream(request: ChatRequest):
+    """
+    AI 聊天接口（流式输出）
+    返回 SSE 格式的数据流，客户端可以边收边显示。
+    """
+    def event_generator(): # 定义一个生成器
+        """SSE 事件生成器：把 AI 的逐字输出转成 SSE 格式"""
+        try:
+            # ① stream=True 开启流式模式
+            stream = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": request.message}
+                ],
+                stream=True
+            )
+
+            # ② 逐个读取 chunk，转成 SSE 格式 yield 出去
+            for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content is not None: # 流式模式下，openai SDK返回的第一个chunk通常是“元信息”None，如果不判断，None也会被yield出去，客户端会收到问题。
+                    yield f"data: {json.dumps({'content': content})}\n\n"
+
+            # ③ 推完，发送结束标记
+            yield "data: [DONE]\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield "data: [DONE]\n\n"
+
+    # ④ 返回 StreamingResponse
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream"  # 这是数据流，来一条处理一条
+    )
