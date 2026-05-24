@@ -159,3 +159,7 @@ async def create_news(
 
 # 注册AI聊天路由
 app.include_router(chat_router)
+
+# 注册RAG路由
+from routers.rag import router as rag_router
+app.include_router(rag_router)
