@@ -1,5 +1,6 @@
 import os
 import json
+from crud.chat import save_message,load_history,new_conversation_id
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -24,65 +25,93 @@ router = APIRouter(
 
 # 3、定义 POST/chat 接口
 @router.post("/chat")
-def chat(request:ChatRequest):
+def chat(request: ChatRequest):
     """
-    AI聊天接口
-
-    接收用户消息，调用 DeepSeek 大模型，返回 AI 回答
+    AI聊天接口（支持多轮对话）
     """
     try:
-        # 4、调用大模型
+        # ① 确定 conversation_id
+        if request.conversation_id:
+            cid = request.conversation_id
+        else:
+            cid = new_conversation_id()
+
+        # ② 存用户消息到 MySQL
+        save_message(cid, "user", request.message)
+
+        # ③ 从 MySQL 加载历史消息
+        history = load_history(cid)
+
+        # ④ 拼成 messages 数组
+        messages = [{"role": "system", "content": system_prompt}]
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+        # ⑤ 调用大模型
         response = client.chat.completions.create(
             model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request.message}
-            ]
+            messages=messages
         )
-
-        # 5、取出 AI回答，返回给调用者
         reply = response.choices[0].message.content
-        return {"reply":reply}
+
+        # ⑥ 存 AI 回复到 MySQL
+        save_message(cid, "assistant", reply)
+
+        # ⑦ 返回（多了 conversation_id）
+        return {"conversation_id": cid, "reply": reply}
 
     except Exception as e:
-        # 6、统一异常处理
-        raise HTTPException(status_code=500,detail=f"AI调用失败：{str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI调用失败：{str(e)}")
 
-# 流式输出端点
+# 4、流式输出端点
 @router.post("/chat/stream")
 def chat_stream(request: ChatRequest):
     """
-    AI 聊天接口（流式输出）
-    返回 SSE 格式的数据流，客户端可以边收边显示。
+    AI 聊天接口（流式输出 + 多轮对话）
     """
-    def event_generator(): # 定义一个生成器
-        """SSE 事件生成器：把 AI 的逐字输出转成 SSE 格式"""
+    # ① 确定 conversation_id（放在 generator 外面）
+    if request.conversation_id:
+        cid = request.conversation_id
+    else:
+        cid = new_conversation_id()
+
+    # ② 存用户消息
+    save_message(cid, "user", request.message)
+
+    # ③ 加载历史 + 拼 messages
+    history = load_history(cid)
+    messages = [{"role": "system", "content": system_prompt}]
+    for msg in history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+
+    def event_generator():
+        """SSE 事件生成器（带历史记忆 + 流后存库）"""
+        full_reply = ""  # ← 新增：拼接完整回复
         try:
-            # ① stream=True 开启流式模式
             stream = client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": request.message}
-                ],
+                messages=messages,
                 stream=True
             )
 
-            # ② 逐个读取 chunk，转成 SSE 格式 yield 出去
             for chunk in stream:
                 content = chunk.choices[0].delta.content
-                if content is not None: # 流式模式下，openai SDK返回的第一个chunk通常是“元信息”None，如果不判断，None也会被yield出去，客户端会收到问题。
+                if content is not None:
+                    full_reply += content  # ← 新增：追加到完整回复
                     yield f"data: {json.dumps({'content': content})}\n\n"
 
-            # ③ 推完，发送结束标记
+            # 推送 conversation_id 给客户端
+            yield f"data: {json.dumps({'conversation_id': cid})}\n\n"
             yield "data: [DONE]\n\n"
+
+            # ← 关键：流结束后存 AI 回复到 MySQL
+            save_message(cid, "assistant", full_reply)
 
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             yield "data: [DONE]\n\n"
 
-    # ④ 返回 StreamingResponse
     return StreamingResponse(
         event_generator(),
-        media_type="text/event-stream"  # 这是数据流，来一条处理一条
+        media_type="text/event-stream"
     )
